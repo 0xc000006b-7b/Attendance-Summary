@@ -4,25 +4,43 @@ import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
 import java.io.ByteArrayInputStream
 import java.util.zip.ZipInputStream
-import com.bcctesda.attendancesummary.data.*
 
-/** Reads every worksheet of an .xlsx file into rows of text cells. */
-fun readXlsxSheets(bytes: ByteArray): List<List<List<String>>> {
-    var sharedXml: ByteArray? = null
-    val sheetXml = sortedMapOf<Int, ByteArray>()
+/** Returns (sheet name, rows) for every worksheet in an .xlsx, in workbook order. */
+fun readXlsxSheets(bytes: ByteArray): List<Pair<String, List<List<String>>>> {
+    val files = HashMap<String, ByteArray>()
     ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
         var e = zip.nextEntry
         while (e != null) {
             val n = e.name
-            if (n == "xl/sharedStrings.xml") sharedXml = zip.readBytes()
-            else if (n.startsWith("xl/worksheets/sheet") && n.endsWith(".xml"))
-                sheetXml[n.filter(Char::isDigit).toIntOrNull() ?: 0] = zip.readBytes()
+            if (n.startsWith("xl/") && (n.endsWith(".xml") || n.endsWith(".rels"))) files[n] = zip.readBytes()
             e = zip.nextEntry
         }
     }
     val shared = mutableListOf<String>()
-    sharedXml?.let { parseSharedStrings(it, shared) }
-    return sheetXml.values.map { parseSheet(it, shared) }
+    files["xl/sharedStrings.xml"]?.let { parseSharedStrings(it, shared) }
+
+    val rels = files["xl/_rels/workbook.xml.rels"]
+        ?.let { attrs(it, "Relationship", "Id", "Target") }.orEmpty()
+        .mapNotNull { r -> if (r[0] != null && r[1] != null) r[0]!! to r[1]!! else null }.toMap()
+    val sheets = files["xl/workbook.xml"]?.let { attrs(it, "sheet", "name", "r:id") }.orEmpty()
+
+    return sheets.mapNotNull { s ->
+        val name = s[0] ?: return@mapNotNull null
+        val target = rels[s[1]] ?: return@mapNotNull null
+        val path = "xl/" + target.removePrefix("/").removePrefix("xl/")
+        files[path]?.let { name to parseSheet(it, shared) }
+    }
+}
+
+private fun attrs(bytes: ByteArray, tag: String, vararg names: String): List<List<String?>> {
+    val p = Xml.newPullParser().apply { setInput(ByteArrayInputStream(bytes), "UTF-8") }
+    val out = mutableListOf<List<String?>>()
+    var ev = p.eventType
+    while (ev != XmlPullParser.END_DOCUMENT) {
+        if (ev == XmlPullParser.START_TAG && p.name == tag) out.add(names.map { p.getAttributeValue(null, it) })
+        ev = p.next()
+    }
+    return out
 }
 
 private fun parseSharedStrings(bytes: ByteArray, out: MutableList<String>) {
@@ -70,7 +88,7 @@ private fun parseSheet(bytes: ByteArray, shared: List<String>): List<List<String
                     value = StringBuilder()
                 }
                 "v" -> inV = true
-                "t" -> inT = true            // inline strings
+                "t" -> inT = true
             }
             XmlPullParser.TEXT -> if (inV || inT) value.append(p.text)
             XmlPullParser.END_TAG -> when (p.name) {
@@ -92,19 +110,4 @@ private fun parseSheet(bytes: ByteArray, shared: List<String>): List<List<String
         ev = p.next()
     }
     return rows
-}
-
-/** Accepts .xlsx or .csv content (detected from the file bytes, not the file name). */
-fun parseAttendanceFile(bytes: ByteArray): CsvData = when {
-    bytes.size > 4 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte() -> {
-        val rows = readXlsxSheets(bytes).firstOrNull { sheet ->
-            sheet.any { r -> r.any { it.trim().equals("LAST NAME", true) } }
-        }
-        requireNotNull(rows) { "No sheet with a \"LAST NAME\" header row was found in this workbook." }
-        parseAttendanceRows(rows)
-    }
-    bytes.size > 4 && bytes[0] == 0xD0.toByte() && bytes[1] == 0xCF.toByte() ->
-        throw IllegalArgumentException(
-            "This is an old binary .xls file. Open it in Excel and use Save As > .xlsx (or CSV UTF-8), then import that.")
-    else -> parseAttendanceCsv(String(bytes, Charsets.UTF_8))
 }
