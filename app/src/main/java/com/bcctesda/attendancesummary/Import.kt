@@ -48,10 +48,16 @@ private val datePatterns = listOf(
 )
 
 private fun toDate(raw: String): LocalDate? {
-    val s = clean(raw)
+    val s = clean(raw).substringBefore(' ').substringBefore('T')
     if (s.isEmpty()) return null
-    s.toDoubleOrNull()?.toLong()?.let {                      // Excel date number
-        if (it in 30000..80000) return LocalDate.of(1899, 12, 30).plusDays(it)
+    s.toDoubleOrNull()?.toLong()?.let {
+        if (it in 10000..90000) {
+            val d1 = LocalDate.of(1899, 12, 30).plusDays(it)
+            if (d1.year in 2000..2040) return d1
+            val d2 = LocalDate.of(1904, 1, 1).plusDays(it)
+            if (d2.year in 2000..2040) return d2
+            return d1
+        }
     }
     return datePatterns.firstNotNullOfOrNull { p ->
         runCatching {
